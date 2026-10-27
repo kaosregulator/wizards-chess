@@ -1702,6 +1702,8 @@ export function initWizardChess() {
       orbitControls.enabled = true;
       orbitControls.update();
 
+      clearAllPieceEmotes();
+      closePieceAnimWheel();
       clearAllPieces();
       clearSquareHighlights();
       selectedSquare = null;
@@ -1734,6 +1736,7 @@ export function initWizardChess() {
 
       renderer.shadowMap.needsUpdate = true;
       updateTurnUI();
+      updateMoveHistoryUI();
       if (typeof updateScriptBarUI === 'function') updateScriptBarUI();
       return true;
     }
@@ -1752,6 +1755,8 @@ export function initWizardChess() {
         activeDuelSavedCam = null;
       }
       orbitControls.enabled = true;
+      clearAllPieceEmotes();
+      closePieceAnimWheel();
       clearAllPieces();
       clearSquareHighlights();
       selectedSquare = null;
@@ -1784,6 +1789,7 @@ export function initWizardChess() {
 
       renderer.shadowMap.needsUpdate = true;
       updateTurnUI();
+      updateMoveHistoryUI();
       if (typeof updateScriptBarUI === 'function') updateScriptBarUI();
       maybeScheduleAIMove();
     }
@@ -2066,6 +2072,756 @@ export function initWizardChess() {
     const MELEE_STANDOFF = 0.36; // Optimal melee standoff (1.06 squares) so sword blades visibly bridge the gap and cleave into defender before burst
 
     // =========================================================================
+    // Procedural Stone Sliding & Sanctum Audio Engine (Web Audio API)
+    // =========================================================================
+    let audioCtx = null;
+    let stoneNoiseBuffer = null;
+    let soundMuted = false;
+    const audioTelemetry = {
+      stoneSlideCount: 0,
+      emoteSoundCount: 0,
+      lastSlideDuration: 0,
+      lastEmotePlayed: null,
+      soundMuted: false
+    };
+
+    function getOrInitAudioContext() {
+      if (soundMuted) return null;
+      try {
+        const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtxClass) return null;
+        if (!audioCtx) {
+          audioCtx = new AudioCtxClass();
+        }
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume().catch(() => {});
+        }
+        if (!stoneNoiseBuffer && audioCtx) {
+          const sampleRate = audioCtx.sampleRate || 44100;
+          const length = Math.floor(sampleRate * 2.5);
+          stoneNoiseBuffer = audioCtx.createBuffer(1, length, sampleRate);
+          const data = stoneNoiseBuffer.getChannelData(0);
+          // Generate warm brown/granular stone friction noise
+          let lastOut = 0.0;
+          for (let i = 0; i < length; i++) {
+            const white = Math.random() * 2 - 1;
+            lastOut = (lastOut + 0.045 * white) / 1.045;
+            // Add subtle fine mineral grain
+            const grain = (Math.random() * 2 - 1) * 0.18;
+            data[i] = Math.max(-1, Math.min(1, lastOut * 2.6 + grain));
+          }
+        }
+        return audioCtx;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function playStoneSlideSound(durationSec = 0.72, isCapture = false, isCastle = false) {
+      const slideDur = Math.max(0.28, Math.min(2.2, Number(durationSec) || 0.72));
+      audioTelemetry.stoneSlideCount += 1;
+      audioTelemetry.lastSlideDuration = Number(slideDur.toFixed(3));
+
+      const ctx = getOrInitAudioContext();
+      if (!ctx || !stoneNoiseBuffer) return;
+
+      try {
+        const now = ctx.currentTime;
+
+        const triggerSingleSlide = (startOffset, dur, gainScale = 1.0) => {
+          const t0 = now + startOffset;
+          const tEnd = t0 + dur;
+
+          // 1. Granular Stone-on-Marble Friction Layer
+          const noiseSrc = ctx.createBufferSource();
+          noiseSrc.buffer = stoneNoiseBuffer;
+          noiseSrc.loop = true;
+
+          const bandpass = ctx.createBiquadFilter();
+          bandpass.type = 'bandpass';
+          bandpass.frequency.setValueAtTime(240, t0);
+          bandpass.frequency.linearRampToValueAtTime(365, t0 + dur * 0.45);
+          bandpass.frequency.linearRampToValueAtTime(215, tEnd);
+          bandpass.Q.value = 2.1;
+
+          const lowpass = ctx.createBiquadFilter();
+          lowpass.type = 'lowpass';
+          lowpass.frequency.setValueAtTime(520, t0);
+          lowpass.frequency.linearRampToValueAtTime(680, t0 + dur * 0.5);
+          lowpass.frequency.linearRampToValueAtTime(340, tEnd);
+
+          const frictionGain = ctx.createGain();
+          const peakGain = 0.16 * gainScale;
+          frictionGain.gain.setValueAtTime(0.0001, t0);
+          frictionGain.gain.linearRampToValueAtTime(peakGain, t0 + Math.min(0.09, dur * 0.2));
+          frictionGain.gain.setValueAtTime(peakGain * 0.92, Math.max(t0 + 0.1, tEnd - 0.11));
+          frictionGain.gain.exponentialRampToValueAtTime(0.0001, tEnd + 0.04);
+
+          noiseSrc.connect(bandpass);
+          bandpass.connect(lowpass);
+          lowpass.connect(frictionGain);
+          frictionGain.connect(ctx.destination);
+
+          noiseSrc.start(t0, Math.random() * 0.8);
+          noiseSrc.stop(tEnd + 0.05);
+
+          // 2. Heavy Carved Stone Sub-Rumble Layer
+          const rumbleOsc = ctx.createOscillator();
+          rumbleOsc.type = 'triangle';
+          rumbleOsc.frequency.setValueAtTime(62, t0);
+          rumbleOsc.frequency.linearRampToValueAtTime(76, t0 + dur * 0.5);
+          rumbleOsc.frequency.linearRampToValueAtTime(54, tEnd);
+
+          const rumbleFilter = ctx.createBiquadFilter();
+          rumbleFilter.type = 'lowpass';
+          rumbleFilter.frequency.value = 145;
+
+          const rumbleGain = ctx.createGain();
+          const rPeak = 0.055 * gainScale;
+          rumbleGain.gain.setValueAtTime(0.0001, t0);
+          rumbleGain.gain.linearRampToValueAtTime(rPeak, t0 + Math.min(0.08, dur * 0.2));
+          rumbleGain.gain.exponentialRampToValueAtTime(0.0001, tEnd + 0.03);
+
+          rumbleOsc.connect(rumbleFilter);
+          rumbleFilter.connect(rumbleGain);
+          rumbleGain.connect(ctx.destination);
+
+          rumbleOsc.start(t0);
+          rumbleOsc.stop(tEnd + 0.04);
+
+          // 3. Subtle Pedestal Settling "Thock" on Destination Square
+          const settleTime = Math.max(t0 + 0.05, tEnd - 0.035);
+          const thudOsc = ctx.createOscillator();
+          thudOsc.type = 'sine';
+          thudOsc.frequency.setValueAtTime(102, settleTime);
+          thudOsc.frequency.exponentialRampToValueAtTime(42, settleTime + 0.085);
+
+          const thudGain = ctx.createGain();
+          thudGain.gain.setValueAtTime(0.0001, settleTime);
+          thudGain.gain.linearRampToValueAtTime(0.095 * gainScale, settleTime + 0.012);
+          thudGain.gain.exponentialRampToValueAtTime(0.0001, settleTime + 0.095);
+
+          thudOsc.connect(thudGain);
+          thudGain.connect(ctx.destination);
+
+          thudOsc.start(settleTime);
+          thudOsc.stop(settleTime + 0.10);
+        };
+
+        triggerSingleSlide(0, slideDur, 1.0);
+        if (isCastle) {
+          triggerSingleSlide(0.06, slideDur * 0.92, 0.78);
+        }
+      } catch (e) {}
+    }
+
+    function playEmoteSound(emoteType) {
+      audioTelemetry.emoteSoundCount += 1;
+      audioTelemetry.lastEmotePlayed = emoteType;
+      const ctx = getOrInitAudioContext();
+      if (!ctx) return;
+
+      try {
+        const now = ctx.currentTime;
+        if (emoteType === 'dance' || emoteType === 'groove') {
+          // Rhythmic stone marimba / sanctum chime groove notes
+          const notes = emoteType === 'dance' ? [261.6, 329.6, 392.0, 523.2] : [220.0, 293.7, 349.2, 440.0];
+          notes.forEach((freq, idx) => {
+            const t = now + idx * 0.14;
+            const osc = ctx.createOscillator();
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(freq, t);
+            const g = ctx.createGain();
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.linearRampToValueAtTime(0.065, t + 0.015);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+            osc.connect(g);
+            g.connect(ctx.destination);
+            osc.start(t);
+            osc.stop(t + 0.19);
+          });
+        } else if (emoteType === 'float') {
+          // Ethereal harmonic levitation shimmer
+          [330, 495, 660].forEach((freq, i) => {
+            const osc = ctx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(freq, now);
+            osc.frequency.linearRampToValueAtTime(freq * 1.12, now + 1.1);
+            const g = ctx.createGain();
+            g.gain.setValueAtTime(0.0001, now);
+            g.gain.linearRampToValueAtTime(0.04 / (i + 1), now + 0.25);
+            g.gain.exponentialRampToValueAtTime(0.0001, now + 1.35);
+            osc.connect(g);
+            g.connect(ctx.destination);
+            osc.start(now);
+            osc.stop(now + 1.4);
+          });
+        } else if (emoteType === 'angry') {
+          // Low stone war-stomp impacts
+          [0, 0.36, 0.72].forEach((offset) => {
+            const t = now + offset;
+            const osc = ctx.createOscillator();
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(115, t);
+            osc.frequency.exponentialRampToValueAtTime(38, t + 0.16);
+            const flt = ctx.createBiquadFilter();
+            flt.type = 'lowpass';
+            flt.frequency.value = 210;
+            const g = ctx.createGain();
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.linearRampToValueAtTime(0.11, t + 0.015);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+            osc.connect(flt);
+            flt.connect(g);
+            g.connect(ctx.destination);
+            osc.start(t);
+            osc.stop(t + 0.19);
+          });
+        } else if (emoteType === 'spin') {
+          // Rising whirlwind whoosh
+          playStoneSlideSound(0.55, false, false);
+          audioTelemetry.stoneSlideCount -= 1; // keep slide count strictly for board moves
+        }
+      } catch (e) {}
+    }
+
+    function toggleSoundMute(forceMute) {
+      soundMuted = typeof forceMute === 'boolean' ? forceMute : !soundMuted;
+      audioTelemetry.soundMuted = soundMuted;
+      const btnSound = document.getElementById('btn-sound-toggle');
+      if (btnSound) {
+        btnSound.textContent = soundMuted ? 'Sound: Off' : 'Sound: On';
+        btnSound.classList.toggle('active', !soundMuted);
+      }
+      return soundMuted;
+    }
+
+    // =========================================================================
+    // Move History Log Window Formatting & Interactive Board Trace
+    // =========================================================================
+    const PIECE_GLYPHS = {
+      w: { king: '♔', queen: '♕', rook: '♖', bishop: '♗', knight: '♘', pawn: '♙' },
+      b: { king: '♚', queen: '♛', rook: '♜', bishop: '♝', knight: '♞', pawn: '♟' }
+    };
+    const SAN_LETTERS = { king: 'K', queen: 'Q', rook: 'R', bishop: 'B', knight: 'N', pawn: '' };
+
+    function squareToCoord(r, c) {
+      return `${String.fromCharCode(97 + c)}${8 - r}`;
+    }
+
+    function buildMoveNotation(piece, fromR, fromC, toR, toC, isCapture, isCastling, isPromoted) {
+      const fromSq = squareToCoord(fromR, fromC);
+      const toSq = squareToCoord(toR, toC);
+      const coord = `${fromSq}→${toSq}`;
+      if (isCastling) {
+        return {
+          san: toC > fromC ? 'O-O' : 'O-O-O',
+          coord
+        };
+      }
+      let san = '';
+      if (piece.type === 'pawn') {
+        san = isCapture ? `${fromSq[0]}x${toSq}` : toSq;
+        if (isPromoted) san += '=Q';
+      } else {
+        san = `${SAN_LETTERS[piece.type] || ''}${isCapture ? 'x' : ''}${toSq}`;
+      }
+      return { san, coord };
+    }
+
+    function highlightHistoryMoveOnBoard(fromR, fromC, toR, toC) {
+      if (isAnimatingMove) return;
+      clearSquareHighlights();
+      const pairs = [
+        { r: fromR, c: fromC, color: 0x4ea8de },
+        { r: toR, c: toC, color: 0xf5d76e }
+      ];
+      for (const item of pairs) {
+        const pos = boardToWorld(item.r, item.c);
+        const ringGeo = new THREE.RingGeometry(0.115, 0.16, 32);
+        ringGeo.rotateX(-Math.PI / 2);
+        const ringMat = new THREE.MeshBasicMaterial({ color: item.color, side: THREE.DoubleSide });
+        const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+        ringMesh.position.set(pos.x, BOARD_SURFACE_Y + 0.013, pos.z);
+        squareHighlightsGroup.add(ringMesh);
+      }
+    }
+
+    function updateMoveHistoryUI() {
+      const countEl = document.getElementById('move-history-count');
+      const undoBtn = document.getElementById('btn-move-history-undo');
+      const listEl = document.getElementById('move-history-list');
+
+      if (countEl) {
+        const fullMoves = Math.ceil(moveHistory.length / 2);
+        countEl.textContent = moveHistory.length === 0 ? '0' : `${fullMoves} (${moveHistory.length}p)`;
+      }
+      if (undoBtn) {
+        undoBtn.disabled = moveHistory.length === 0 || isAnimatingMove;
+      }
+      if (!listEl) return;
+
+      if (moveHistory.length === 0) {
+        listEl.innerHTML =
+          '<div class="move-history-empty">No moves recorded yet. Click any piece to move or emote.</div>';
+        return;
+      }
+
+      listEl.innerHTML = '';
+      for (let i = 0; i < moveHistory.length; i += 2) {
+        const turnNum = Math.floor(i / 2) + 1;
+        const whiteEntry = moveHistory[i];
+        const blackEntry = moveHistory[i + 1] || null;
+
+        const rowEl = document.createElement('div');
+        rowEl.className = 'move-history-row';
+
+        const numSpan = document.createElement('span');
+        numSpan.className = 'move-turn-num';
+        numSpan.textContent = `${turnNum}.`;
+        rowEl.appendChild(numSpan);
+
+        const renderPlyButton = (entry, plyIdx) => {
+          if (!entry || !entry.move) {
+            const placeholder = document.createElement('span');
+            return placeholder;
+          }
+          const mv = entry.move;
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'move-ply-cell' + (plyIdx === moveHistory.length - 1 ? ' latest-ply' : '');
+          btn.title = `Ply ${plyIdx + 1}: ${mv.color === 'w' ? 'White' : 'Black'} ${mv.pieceType} (${mv.coord || ''}) — Click to highlight squares`;
+
+          const mainSpan = document.createElement('span');
+          mainSpan.className = 'move-ply-main';
+
+          const glyphSpan = document.createElement('span');
+          glyphSpan.className = 'move-ply-glyph';
+          glyphSpan.textContent = PIECE_GLYPHS[mv.color]?.[mv.pieceType] || '♙';
+
+          const sanSpan = document.createElement('span');
+          sanSpan.className = 'move-ply-san';
+          sanSpan.textContent = mv.san || squareToCoord(mv.toR, mv.toC);
+
+          mainSpan.appendChild(glyphSpan);
+          mainSpan.appendChild(sanSpan);
+          btn.appendChild(mainSpan);
+
+          if (mv.capture) {
+            const capBadge = document.createElement('span');
+            capBadge.className = 'move-ply-capture';
+            const capGlyph = mv.capturedType ? (PIECE_GLYPHS[mv.color === 'w' ? 'b' : 'w']?.[mv.capturedType] || '') : '';
+            capBadge.textContent = `×${capGlyph}`;
+            btn.appendChild(capBadge);
+          } else {
+            const coordSpan = document.createElement('span');
+            coordSpan.className = 'move-ply-coord';
+            coordSpan.textContent = mv.coord || '';
+            btn.appendChild(coordSpan);
+          }
+
+          btn.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            highlightHistoryMoveOnBoard(mv.fromR, mv.fromC, mv.toR, mv.toC);
+          });
+          return btn;
+        };
+
+        rowEl.appendChild(renderPlyButton(whiteEntry, i));
+        rowEl.appendChild(renderPlyButton(blackEntry, i + 1));
+        listEl.appendChild(rowEl);
+      }
+
+      listEl.scrollTop = listEl.scrollHeight;
+    }
+
+    // =========================================================================
+    // Radial 5-Animation Emote Wheel & 3D Piece Emote Choreography
+    // (Dance, Float, Angry, Spin, Groove)
+    // =========================================================================
+    let wheelTargetPiece = null;
+    const activePieceEmotes = new Map(); // piece -> { type, elapsed, duration, basePos, baseRotY, baseScale, fxGroup, stompCount }
+    const _wheelProjVec = new THREE.Vector3();
+
+    function resetPieceFromEmote(piece) {
+      if (!piece) return;
+      const state = activePieceEmotes.get(piece);
+      if (state) {
+        if (state.fxGroup && state.fxGroup.parent) {
+          state.fxGroup.parent.remove(state.fxGroup);
+        }
+        activePieceEmotes.delete(piece);
+      }
+      if (piece.mesh) {
+        const home = boardToWorld(piece.r, piece.c);
+        piece.mesh.position.copy(home);
+        piece.mesh.rotation.set(0, piece.color === 'w' ? Math.PI : 0, 0);
+        piece.mesh.scale.setScalar(BOARD_SQ_SIZE);
+      }
+      playPieceClip(piece, 'Idle', true, 0.14);
+    }
+
+    function clearAllPieceEmotes() {
+      for (const piece of Array.from(activePieceEmotes.keys())) {
+        resetPieceFromEmote(piece);
+      }
+      activePieceEmotes.clear();
+      document.querySelectorAll('.wheel-emote-btn').forEach((b) => b.classList.remove('active-emote'));
+    }
+
+    function closePieceAnimWheel() {
+      wheelTargetPiece = null;
+      const wheelEl = document.getElementById('piece-anim-wheel');
+      if (wheelEl) {
+        wheelEl.classList.remove('open');
+        wheelEl.setAttribute('aria-hidden', 'true');
+        wheelEl.style.transform = 'translate3d(-9999px, -9999px, 0) scale(0.76)';
+      }
+      document.querySelectorAll('.wheel-emote-btn').forEach((b) => b.classList.remove('active-emote'));
+    }
+
+    function updatePieceAnimWheelScreenPos() {
+      const wheelEl = document.getElementById('piece-anim-wheel');
+      if (!wheelEl || !wheelTargetPiece || !wheelTargetPiece.mesh || !wheelTargetPiece.mesh.parent) {
+        if (wheelTargetPiece) closePieceAnimWheel();
+        return;
+      }
+      if (isAnimatingMove || gameOver) {
+        closePieceAnimWheel();
+        return;
+      }
+
+      const homePos = boardToWorld(wheelTargetPiece.r, wheelTargetPiece.c);
+      const pHeight = PIECE_HEIGHTS[wheelTargetPiece.type] || 0.45;
+      _wheelProjVec.set(homePos.x, BOARD_SURFACE_Y + pHeight * 0.58, homePos.z);
+      _wheelProjVec.project(camera);
+
+      // Hide if behind camera frustum
+      if (_wheelProjVec.z > 1.0) {
+        wheelEl.style.opacity = '0';
+        return;
+      }
+      wheelEl.style.opacity = '';
+
+      const rawX = (_wheelProjVec.x * 0.5 + 0.5) * window.innerWidth;
+      const rawY = (-_wheelProjVec.y * 0.5 + 0.5) * window.innerHeight;
+      const marginX = 118;
+      const marginY = 112;
+      const clampedX = Math.max(marginX, Math.min(window.innerWidth - marginX, rawX));
+      const clampedY = Math.max(marginY, Math.min(window.innerHeight - marginY, rawY));
+
+      wheelEl.style.transform = `translate3d(${Math.round(clampedX)}px, ${Math.round(clampedY)}px, 0) scale(1)`;
+    }
+
+    function openPieceAnimWheel(piece) {
+      if (!piece || !piece.mesh || isAnimatingMove || gameOver) return;
+      wheelTargetPiece = piece;
+
+      const wheelEl = document.getElementById('piece-anim-wheel');
+      const glyphEl = document.getElementById('wheel-piece-glyph');
+      const labelEl = document.getElementById('wheel-piece-label');
+
+      const sqCoord = squareToCoord(piece.r, piece.c);
+      if (glyphEl) {
+        glyphEl.textContent = PIECE_GLYPHS[piece.color]?.[piece.type] || '♘';
+      }
+      if (labelEl) {
+        const capType = piece.type.charAt(0).toUpperCase() + piece.type.slice(1);
+        labelEl.textContent = `${capType} · ${sqCoord}`;
+      }
+
+      const activeState = activePieceEmotes.get(piece);
+      document.querySelectorAll('.wheel-emote-btn').forEach((btn) => {
+        const em = btn.getAttribute('data-emote');
+        btn.classList.toggle('active-emote', Boolean(activeState && activeState.type === em));
+      });
+
+      if (wheelEl) {
+        wheelEl.classList.add('open');
+        wheelEl.setAttribute('aria-hidden', 'false');
+      }
+      updatePieceAnimWheelScreenPos();
+    }
+
+    function triggerPieceEmote(piece, emoteType) {
+      if (!piece || !piece.mesh || isAnimatingMove || gameOver) return false;
+      const validTypes = ['dance', 'float', 'angry', 'spin', 'groove'];
+      const chosen = validTypes.includes(emoteType) ? emoteType : 'dance';
+
+      // Clean up any previous emote on this piece first
+      if (activePieceEmotes.has(piece)) {
+        const prev = activePieceEmotes.get(piece);
+        if (prev.fxGroup && prev.fxGroup.parent) {
+          prev.fxGroup.parent.remove(prev.fxGroup);
+        }
+        activePieceEmotes.delete(piece);
+      }
+
+      const basePos = boardToWorld(piece.r, piece.c);
+      const baseRotY = piece.color === 'w' ? Math.PI : 0;
+      piece.mesh.position.copy(basePos);
+      piece.mesh.rotation.set(0, baseRotY, 0);
+      piece.mesh.scale.setScalar(BOARD_SQ_SIZE);
+
+      // Create 3D Arcane / Sanctum FX ring group under the piece
+      const fxGroup = new THREE.Group();
+      fxGroup.position.set(basePos.x, BOARD_SURFACE_Y + 0.012, basePos.z);
+      scene.add(fxGroup);
+
+      const ringColor =
+        chosen === 'angry'
+          ? 0xe63946
+          : chosen === 'float'
+          ? 0x4ea8de
+          : chosen === 'spin'
+          ? 0xf5d76e
+          : chosen === 'groove'
+          ? 0x72efdd
+          : 0xd4af37;
+
+      const outerGeo = new THREE.RingGeometry(0.11, 0.155, 36);
+      outerGeo.rotateX(-Math.PI / 2);
+      const outerMat = new THREE.MeshBasicMaterial({
+        color: ringColor,
+        transparent: true,
+        opacity: 0.85,
+        side: THREE.DoubleSide
+      });
+      const outerRing = new THREE.Mesh(outerGeo, outerMat);
+      fxGroup.add(outerRing);
+
+      const innerGeo = new THREE.RingGeometry(0.06, 0.088, 28);
+      innerGeo.rotateX(-Math.PI / 2);
+      const innerMat = new THREE.MeshBasicMaterial({
+        color: 0xfff3c4,
+        transparent: true,
+        opacity: 0.72,
+        side: THREE.DoubleSide
+      });
+      const innerRing = new THREE.Mesh(innerGeo, innerMat);
+      innerRing.position.y = 0.004;
+      fxGroup.add(innerRing);
+
+      // Select appropriate skeletal clip to accompany procedural 3D choreography
+      if (chosen === 'angry') {
+        playPieceClip(piece, 'Attack', true, 0.08);
+        if (piece.currentAction) piece.currentAction.timeScale = 1.35;
+      } else if (chosen === 'dance' || chosen === 'groove' || chosen === 'spin') {
+        playPieceClip(piece, 'Move', true, 0.08);
+        if (piece.currentAction) piece.currentAction.timeScale = 1.65;
+      } else {
+        playPieceClip(piece, 'Idle', true, 0.12);
+        if (piece.currentAction) piece.currentAction.timeScale = 1.15;
+      }
+
+      const durations = {
+        dance: 2.6,
+        float: 2.8,
+        angry: 2.3,
+        spin: 2.1,
+        groove: 2.7
+      };
+
+      activePieceEmotes.set(piece, {
+        type: chosen,
+        elapsed: 0,
+        duration: durations[chosen] || 2.5,
+        basePos,
+        baseRotY,
+        baseScale: BOARD_SQ_SIZE,
+        fxGroup,
+        outerRing,
+        innerRing,
+        stompCount: 0
+      });
+
+      document.querySelectorAll('.wheel-emote-btn').forEach((btn) => {
+        btn.classList.toggle('active-emote', btn.getAttribute('data-emote') === chosen);
+      });
+
+      playEmoteSound(chosen);
+      renderer.shadowMap.needsUpdate = true;
+      return true;
+    }
+
+    function stepPieceEmotes(dt) {
+      if (activePieceEmotes.size === 0) return;
+
+      for (const [piece, st] of Array.from(activePieceEmotes.entries())) {
+        if (!piece || !piece.mesh || !piece.mesh.parent || isAnimatingMove) {
+          resetPieceFromEmote(piece);
+          continue;
+        }
+
+        st.elapsed += dt;
+        const t = st.elapsed;
+        const u = Math.min(1, t / st.duration);
+        const env = Math.sin(u * Math.PI); // Smooth entry & exit envelope
+        const S = st.baseScale;
+
+        if (st.type === 'dance') {
+          // 1. DANCE: Upbeat Royal Stone Boogie — side-to-side hops, hip sway, cheerful twist & squash/stretch
+          const beat = t * 11.5;
+          const hop = Math.abs(Math.sin(beat)) * 0.11 * env;
+          const swayX = Math.sin(beat * 0.5) * 0.055 * env;
+          const rollZ = Math.sin(beat * 0.5) * 0.24 * env;
+          const yawTwist = Math.sin(beat * 0.5) * 0.52 * env;
+          const pitchNod = Math.cos(beat) * 0.10 * env;
+          const squash = 1 + Math.sin(beat * 2) * 0.085 * env;
+
+          piece.mesh.position.set(
+            st.basePos.x + swayX,
+            st.basePos.y + hop,
+            st.basePos.z
+          );
+          piece.mesh.rotation.set(pitchNod, st.baseRotY + yawTwist, rollZ);
+          piece.mesh.scale.set(S / Math.sqrt(squash), S * squash, S / Math.sqrt(squash));
+
+          if (st.outerRing) {
+            const pulse = 1 + Math.abs(Math.sin(beat)) * 0.32;
+            st.outerRing.scale.setScalar(pulse);
+            st.outerRing.material.opacity = 0.8 * env;
+            st.innerRing.rotation.z = t * 3.5;
+          }
+        } else if (st.type === 'float') {
+          // 2. FLOAT: Mystic Arcane Levitation — smooth rise high above the altar, zero-G drift & rising aura ring
+          const liftCurve = Math.sin(u * Math.PI);
+          const hoverBob = Math.sin(t * 5.2) * 0.038 * liftCurve;
+          const floatHeight = (0.36 * Math.pow(liftCurve, 0.75)) + hoverBob;
+          const slowSpin = u * Math.PI * 2;
+          const zeroGTiltX = Math.sin(t * 3.4) * 0.14 * liftCurve;
+          const zeroGTiltZ = Math.cos(t * 2.8) * 0.14 * liftCurve;
+
+          piece.mesh.position.set(
+            st.basePos.x + Math.sin(t * 2.5) * 0.025 * liftCurve,
+            st.basePos.y + floatHeight,
+            st.basePos.z + Math.cos(t * 2.5) * 0.025 * liftCurve
+          );
+          piece.mesh.rotation.set(zeroGTiltX, st.baseRotY + slowSpin, zeroGTiltZ);
+          piece.mesh.scale.setScalar(S * (1 + 0.05 * liftCurve));
+
+          if (st.innerRing && st.outerRing) {
+            st.innerRing.position.y = floatHeight * 0.55;
+            st.innerRing.scale.setScalar(1.15 + Math.sin(t * 6) * 0.15);
+            st.outerRing.scale.setScalar(1.0 + liftCurve * 0.42);
+            st.outerRing.material.opacity = 0.85 * liftCurve;
+          }
+        } else if (st.type === 'angry') {
+          // 3. ANGRY: Furious Stone Tantrum — aggressive war-stomps, seething high-frequency tremor & mini stone sparks
+          const stompCycle = (t * 3.6) % 1;
+          const stompHop = Math.max(0, Math.sin(stompCycle * Math.PI)) * 0.12 * env;
+          const rageTremorX = Math.sin(t * 54) * 0.014 * env;
+          const rageTremorZ = Math.cos(t * 49) * 0.014 * env;
+          const thrashYaw = Math.sin(t * 14) * 0.36 * env;
+          const lungePitch = -0.18 * env + Math.sin(t * 18) * 0.12 * env;
+          const tantrumRoll = Math.cos(t * 14) * 0.22 * env;
+          const bulkUp = 1 + 0.12 * env + Math.sin(t * 22) * 0.05 * env;
+
+          piece.mesh.position.set(
+            st.basePos.x + rageTremorX,
+            st.basePos.y + stompHop,
+            st.basePos.z + rageTremorZ
+          );
+          piece.mesh.rotation.set(lungePitch, st.baseRotY + thrashYaw, tantrumRoll);
+          piece.mesh.scale.set(S * bulkUp, S * (2 - bulkUp * 0.88), S * bulkUp);
+
+          // Spawn mini stone impact chips on each stomp
+          const expectedStomps = Math.floor(t * 3.2);
+          if (expectedStomps > st.stompCount && expectedStomps <= 6) {
+            st.stompCount = expectedStomps;
+            impactFlashLight.position.set(st.basePos.x, BOARD_SURFACE_Y + 0.25, st.basePos.z);
+            impactFlashLight.intensity = 3.2;
+          }
+
+          if (st.outerRing) {
+            const shock = 1 + ((t * 3.6) % 1) * 0.65;
+            st.outerRing.scale.setScalar(shock);
+            st.outerRing.material.opacity = (1 - ((t * 3.6) % 1)) * 0.9 * env;
+          }
+        } else if (st.type === 'spin') {
+          // 4. SPIN: Whirlwind 1080° Tornado Pirouette — wind-up crouch, high-speed 3-turn aerial spin & flourish
+          let spinAngle = 0;
+          let liftY = 0;
+          let scaleY = 1;
+          if (u < 0.16) {
+            // Wind-up crouch
+            const w = u / 0.16;
+            spinAngle = -w * 0.45;
+            scaleY = 1 - w * 0.18;
+          } else if (u < 0.86) {
+            // 3 full revolutions (6*PI) in mid-air
+            const s = (u - 0.16) / 0.70;
+            const easeS = easeInOutCubic(s);
+            spinAngle = -0.45 + easeS * (Math.PI * 6 + 0.45);
+            liftY = Math.sin(s * Math.PI) * 0.28;
+            scaleY = 1 + Math.sin(s * Math.PI) * 0.12;
+          } else {
+            // Crisp landing settle
+            const l = (u - 0.86) / 0.14;
+            scaleY = 1 - Math.sin(l * Math.PI) * 0.10;
+          }
+
+          const bankTilt = Math.sin(u * Math.PI) * 0.16 * Math.sin(t * 18);
+          piece.mesh.position.set(st.basePos.x, st.basePos.y + liftY, st.basePos.z);
+          piece.mesh.rotation.set(bankTilt, st.baseRotY + spinAngle, bankTilt * 0.7);
+          piece.mesh.scale.set(S / Math.sqrt(scaleY), S * scaleY, S / Math.sqrt(scaleY));
+
+          if (st.outerRing) {
+            st.outerRing.scale.setScalar(1 + Math.sin(u * Math.PI) * 0.55);
+            st.outerRing.material.opacity = 0.85 * env;
+          }
+        } else if (st.type === 'groove') {
+          // 5. GROOVE: Showoff Breakdance Flip & Moonwalk Groove
+          let flipPitch = 0;
+          let liftY = 0;
+          let slideZ = 0;
+          let yawGroove = 0;
+          if (u < 0.38) {
+            // Slick moonwalk glide & body wave
+            const m = u / 0.38;
+            slideZ = Math.sin(m * Math.PI * 2) * 0.075;
+            liftY = Math.abs(Math.sin(m * Math.PI * 4)) * 0.06;
+            yawGroove = Math.sin(m * Math.PI * 2) * 0.45;
+            flipPitch = Math.sin(m * Math.PI * 4) * 0.18;
+          } else if (u < 0.78) {
+            // Mid-air 360° celebratory backflip
+            const f = (u - 0.38) / 0.40;
+            liftY = Math.sin(f * Math.PI) * 0.34;
+            flipPitch = -easeInOutCubic(f) * Math.PI * 2;
+            yawGroove = Math.sin(f * Math.PI) * 0.35;
+          } else {
+            // Victory b-boy freeze bounce
+            const b = (u - 0.78) / 0.22;
+            liftY = Math.abs(Math.sin(b * Math.PI * 2)) * 0.08 * (1 - b);
+            yawGroove = Math.sin(b * Math.PI * 2) * 0.25 * (1 - b);
+          }
+
+          piece.mesh.position.set(
+            st.basePos.x + Math.sin(t * 9) * 0.03 * env,
+            st.basePos.y + liftY,
+            st.basePos.z + slideZ
+          );
+          piece.mesh.rotation.set(flipPitch, st.baseRotY + yawGroove, Math.sin(t * 10) * 0.18 * env);
+          const grooveSquash = 1 + Math.sin(t * 16) * 0.07 * env;
+          piece.mesh.scale.set(S / Math.sqrt(grooveSquash), S * grooveSquash, S / Math.sqrt(grooveSquash));
+
+          if (st.outerRing) {
+            st.outerRing.scale.setScalar(1.1 + Math.sin(t * 12) * 0.28);
+            st.outerRing.material.opacity = 0.85 * env;
+          }
+        }
+
+        if (st.elapsed >= st.duration) {
+          resetPieceFromEmote(piece);
+          if (wheelTargetPiece === piece) {
+            document.querySelectorAll('.wheel-emote-btn').forEach((b) => b.classList.remove('active-emote'));
+          }
+        }
+      }
+      renderer.shadowMap.needsUpdate = true;
+    }
+
+    // =========================================================================
     // Smooth Attack Camera & Move Execution Choreography
     // =========================================================================
     function executeChessMove(fromR, fromC, toR, toC, options = {}) {
@@ -2090,6 +2846,23 @@ export function initWizardChess() {
         preMoveHighlightTask = null;
       }
 
+      // Close emote wheel and reset any active idle piece emotes before moving
+      closePieceAnimWheel();
+      clearAllPieceEmotes();
+
+      const isCastlingMove = piece.type === 'king' && fromR === toR && Math.abs(toC - fromC) === 2;
+      const isPromotionMove = piece.type === 'pawn' && (toR === 0 || toR === 7);
+      const notationInfo = buildMoveNotation(
+        piece,
+        fromR,
+        fromC,
+        toR,
+        toC,
+        Boolean(targetOnDest),
+        isCastlingMove,
+        isPromotionMove
+      );
+
       // Save board state snapshot (including pre-move scriptCursor & scriptDeviated) so Left Arrow / [ can step backward & re-record
       moveHistory.push({
         snapshot: captureBoardSnapshot(),
@@ -2101,7 +2874,10 @@ export function initWizardChess() {
           toR,
           toC,
           capture: Boolean(targetOnDest),
-          promotion: options.promotion || 'queen'
+          capturedType: targetOnDest ? targetOnDest.type : null,
+          promotion: options.promotion || 'queen',
+          san: notationInfo.san,
+          coord: notationInfo.coord
         }
       });
 
@@ -2128,6 +2904,7 @@ export function initWizardChess() {
         scriptedGameActive = false;
       }
       if (typeof updateScriptBarUI === 'function') updateScriptBarUI();
+      updateMoveHistoryUI();
 
       const captured = targetOnDest;
       const isCapture = Boolean(captured);
@@ -2463,6 +3240,9 @@ export function initWizardChess() {
         };
       }
 
+      // Trigger subtle stone-on-marble sliding sound effect for the moving statue
+      playStoneSlideSound(tApproach, isCapture, isCastling);
+
       let elapsed = 0;
       let attackAnimStarted = false;
       let defenderFlinchTriggered = false;
@@ -2518,7 +3298,22 @@ export function initWizardChess() {
 
         currentTurn = currentTurn === 'w' ? 'b' : 'w';
         isAnimatingMove = false;
+
+        // Append Check (+) or Checkmate (#) suffix to the completed move in Move History
+        const lastHist = moveHistory[moveHistory.length - 1];
+        if (lastHist && lastHist.move && lastHist.move.san) {
+          const oppInCheck = isKingInCheck(currentTurn, boardState);
+          if (oppInCheck) {
+            const oppLegal = getAllLegalMoves(currentTurn);
+            const suffix = oppLegal.length === 0 ? '#' : '+';
+            if (!lastHist.move.san.endsWith('+') && !lastHist.move.san.endsWith('#')) {
+              lastHist.move.san += suffix;
+            }
+          }
+        }
+
         updateTurnUI();
+        updateMoveHistoryUI();
         maybeScheduleAIMove();
       }
 
@@ -3733,10 +4528,6 @@ export function initWizardChess() {
       if (moveDist > 6) return;
       if (isAnimatingMove || gameOver) return;
 
-      // Enforce turn ownership in Multiplayer, and in Single Player only block while AI auto-move timer is actively pending
-      if (gameMode === 'multi' && currentTurn !== playerColor) return;
-      if (!scriptedGameActive && gameMode === 'single' && currentTurn !== playerColor && aiTimer !== null) return;
-
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -3756,6 +4547,7 @@ export function initWizardChess() {
       if (hits.length === 0) {
         if (preMoveHighlightTask) preMoveHighlightTask = null;
         clearSquareHighlights();
+        closePieceAnimWheel();
         selectedSquare = null;
         validMoves = [];
         return;
@@ -3785,7 +4577,11 @@ export function initWizardChess() {
         preMoveHighlightTask = null;
       }
 
-      if (selectedSquare) {
+      const canControlCurrentTurn =
+        !(gameMode === 'multi' && currentTurn !== playerColor) &&
+        !(!scriptedGameActive && gameMode === 'single' && currentTurn !== playerColor && aiTimer !== null);
+
+      if (selectedSquare && canControlCurrentTurn) {
         const move = validMoves.find(
           (m) =>
             (m.r === clickedR && m.c === clickedC) ||
@@ -3798,12 +4594,31 @@ export function initWizardChess() {
       }
 
       const clickedPiece = boardState[clickedR][clickedC];
-      if (clickedPiece && clickedPiece.color === currentTurn) {
-        selectedSquare = { r: clickedR, c: clickedC };
-        validMoves = getLegalMovesForPiece(clickedR, clickedC);
-        showSquareHighlights(clickedR, clickedC, validMoves);
+      if (clickedPiece) {
+        // Toggle off if clicking the exact same piece whose wheel is already open
+        if (wheelTargetPiece === clickedPiece) {
+          clearSquareHighlights();
+          closePieceAnimWheel();
+          selectedSquare = null;
+          validMoves = [];
+          return;
+        }
+
+        // Pop up the 5-Animation Emote Wheel on any clicked idle piece!
+        openPieceAnimWheel(clickedPiece);
+
+        if (clickedPiece.color === currentTurn && canControlCurrentTurn) {
+          selectedSquare = { r: clickedR, c: clickedC };
+          validMoves = getLegalMovesForPiece(clickedR, clickedC);
+          showSquareHighlights(clickedR, clickedC, validMoves);
+        } else {
+          clearSquareHighlights();
+          selectedSquare = null;
+          validMoves = [];
+        }
       } else {
         clearSquareHighlights();
+        closePieceAnimWheel();
         selectedSquare = null;
         validMoves = [];
       }
@@ -4229,6 +5044,52 @@ export function initWizardChess() {
     document.getElementById('btn-cam-side')?.addEventListener('click', () => setCameraPreset('side'));
     document.getElementById('btn-cam-wide')?.addEventListener('click', () => setCameraPreset('wide'));
     document.getElementById('btn-hide-ui')?.addEventListener('click', () => toggleUI());
+    document.getElementById('btn-sound-toggle')?.addEventListener('click', () => toggleSoundMute());
+
+    // Move History Log Window controls
+    document.getElementById('btn-move-history-undo')?.addEventListener('click', () => {
+      if (isAnimatingMove || moveHistory.length === 0) return;
+      stepScriptBackward();
+      // In single-player mode, if stepping back lands on AI's turn, step back one more ply to return to player's turn
+      const aiColor = playerColor === 'w' ? 'b' : 'w';
+      if (gameMode === 'single' && currentTurn === aiColor && moveHistory.length > 0) {
+        stepScriptBackward();
+      }
+      updateMoveHistoryUI();
+    });
+
+    document.getElementById('btn-move-history-collapse')?.addEventListener('click', () => {
+      const winEl = document.getElementById('move-history-window');
+      const btnEl = document.getElementById('btn-move-history-collapse');
+      if (!winEl) return;
+      const isCollapsed = winEl.classList.toggle('collapsed');
+      if (btnEl) {
+        btnEl.textContent = isCollapsed ? '▸' : '▾';
+        btnEl.setAttribute('aria-expanded', String(!isCollapsed));
+      }
+    });
+
+    // Radial 5-Animation Wheel controls
+    document.getElementById('btn-wheel-close')?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      closePieceAnimWheel();
+    });
+
+    document.querySelectorAll('.wheel-emote-btn').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const emoteType = btn.getAttribute('data-emote') || 'dance';
+        if (wheelTargetPiece) {
+          triggerPieceEmote(wheelTargetPiece, emoteType);
+        }
+      });
+    });
+
+    window.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && wheelTargetPiece) {
+        closePieceAnimWheel();
+      }
+    });
 
     document.getElementById('btn-script-modal')?.addEventListener('click', () => openLobbyModal('script'));
     document.getElementById('btn-script-prev')?.addEventListener('click', () => stepScriptBackward());
@@ -4437,6 +5298,22 @@ export function initWizardChess() {
       stepScriptForward,
       stepScriptBackward,
       triggerCheckmateSequence,
+      toggleSoundMute,
+      playStoneSlideSound,
+      openPieceAnimWheel: (r, c) => {
+        const p = typeof r === 'object' ? r : boardState[r]?.[c];
+        if (p) openPieceAnimWheel(p);
+        return Boolean(p);
+      },
+      closePieceAnimWheel,
+      triggerPieceEmote: (r, c, emoteType) => {
+        if (typeof r === 'object' && r !== null) {
+          return triggerPieceEmote(r, c);
+        }
+        const p = boardState[r]?.[c];
+        if (!p) return false;
+        return triggerPieceEmote(p, emoteType);
+      },
       testColumnCollisionSlide: (startArr, endArr, steps = 20) => {
         activeCamTransition = null;
         camera.position.set(startArr[0], startArr[1], startArr[2]);
@@ -4475,6 +5352,8 @@ export function initWizardChess() {
         scriptDeviated = false;
         preMoveHighlightTask = null;
         clearCheckmateSequence();
+        clearAllPieceEmotes();
+        closePieceAnimWheel();
         clearSquareHighlights();
         clearAllPieces();
         for (const p of pieces) {
@@ -4484,6 +5363,7 @@ export function initWizardChess() {
         }
         currentTurn = turn;
         updateTurnUI();
+        updateMoveHistoryUI();
         renderer.render(scene, camera);
       },
       triggerDemoCapture: () => {
@@ -4512,6 +5392,20 @@ export function initWizardChess() {
         scriptMovesCount: scriptMoves.length,
         scriptCursor,
         moveHistoryCount: moveHistory.length,
+        moveHistoryMoves: moveHistory.map((h) => h.move),
+        audioTelemetry: { ...audioTelemetry },
+        wheelOpen: Boolean(wheelTargetPiece),
+        wheelPiece: wheelTargetPiece
+          ? { type: wheelTargetPiece.type, color: wheelTargetPiece.color, r: wheelTargetPiece.r, c: wheelTargetPiece.c }
+          : null,
+        activeEmotes: Array.from(activePieceEmotes.entries()).map(([p, st]) => ({
+          type: p.type,
+          color: p.color,
+          r: p.r,
+          c: p.c,
+          emote: st.type,
+          elapsed: Number(st.elapsed.toFixed(3))
+        })),
         preMoveHighlightActive: Boolean(preMoveHighlightTask),
         selectedSquare,
         validMovesCount: validMoves.length,
@@ -4906,7 +5800,19 @@ export function initWizardChess() {
           Math.cos(elapsedTotal * 9.1 + i) * 0.16;
       }
 
-      if (isAnimatingMove || activeMoveTweens.length > 0 || shatterDebris.length > 0 || checkmateState.active) {
+      // Advance any active 5-animation piece emotes & keep the radial wheel anchored to the clicked piece
+      stepPieceEmotes(dt);
+      if (wheelTargetPiece) {
+        updatePieceAnimWheelScreenPos();
+      }
+
+      if (
+        isAnimatingMove ||
+        activeMoveTweens.length > 0 ||
+        shatterDebris.length > 0 ||
+        checkmateState.active ||
+        activePieceEmotes.size > 0
+      ) {
         renderer.shadowMap.needsUpdate = true;
       }
 

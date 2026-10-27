@@ -193,6 +193,14 @@ export default function App() {
 
           <button
             className="hud-btn"
+            id="btn-sound-toggle"
+            title="Toggle Stone Sliding &amp; Sanctum Sound Effects"
+          >
+            Sound: On
+          </button>
+
+          <button
+            className="hud-btn"
             id="btn-hide-ui"
             title="Toggle HUD visibility (Shortcut: H)"
             onClick={() => setMobileSheetOpen(false)}
@@ -201,14 +209,138 @@ export default function App() {
           </button>
 
           <div className="mobile-sheet-hint">
-            <strong>Touch:</strong> Tap Piece to Move &nbsp;•&nbsp; 1-Finger Drag: Orbit &nbsp;•&nbsp; 2-Finger Drag: Pan &nbsp;•&nbsp; Pinch: Zoom
+            <strong>Touch:</strong> Tap Piece for Emotes / Move &nbsp;•&nbsp; 1-Finger Drag: Orbit &nbsp;•&nbsp; 2-Finger Drag: Pan &nbsp;•&nbsp; Pinch: Zoom
           </div>
         </div>
       </div>
 
+      {/* Clean Move History Log Window */}
+      <aside id="move-history-window" aria-label="Move History Log">
+        <div className="move-history-header" id="move-history-header">
+          <div className="move-history-title-wrap">
+            <span className="move-history-title">Move Log</span>
+            <span className="move-history-count" id="move-history-count">0</span>
+          </div>
+          <div className="move-history-actions">
+            <button
+              type="button"
+              className="move-history-action-btn"
+              id="btn-move-history-undo"
+              title="Undo last move"
+              disabled
+            >
+              ↩ Undo
+            </button>
+            <button
+              type="button"
+              className="move-history-action-btn icon-only"
+              id="btn-move-history-collapse"
+              title="Collapse or expand Move Log"
+              aria-expanded="true"
+            >
+              ▾
+            </button>
+          </div>
+        </div>
+        <div className="move-history-body" id="move-history-body">
+          <div className="move-history-cols" aria-hidden="true">
+            <span className="col-turn">#</span>
+            <span className="col-side">White</span>
+            <span className="col-side">Black</span>
+          </div>
+          <div className="move-history-list" id="move-history-list" role="log" aria-live="polite">
+            <div className="move-history-empty">No moves recorded yet. Click any piece to move or emote.</div>
+          </div>
+        </div>
+      </aside>
+
+      {/* Radial 5-Animation Emote Wheel for Idle Pieces */}
+      <div
+        id="piece-anim-wheel"
+        className="piece-anim-wheel"
+        role="menu"
+        aria-label="Piece Animations"
+        aria-hidden="true"
+      >
+        <div className="wheel-ring-decor" aria-hidden="true"></div>
+        <div className="wheel-center-hub" id="piece-wheel-hub">
+          <span className="wheel-piece-glyph" id="wheel-piece-glyph">♘</span>
+          <span className="wheel-piece-label" id="wheel-piece-label">Knight</span>
+          <button
+            type="button"
+            className="wheel-close-btn"
+            id="btn-wheel-close"
+            title="Close Animation Wheel"
+            aria-label="Close Animation Wheel"
+          >
+            ✕
+          </button>
+        </div>
+
+        <button
+          type="button"
+          className="wheel-emote-btn pos-top"
+          id="btn-emote-dance"
+          data-emote="dance"
+          role="menuitem"
+          title="Royal Stone Boogie Dance"
+        >
+          <span className="wheel-emote-icon" aria-hidden="true">♪</span>
+          <span className="wheel-emote-text">Dance</span>
+        </button>
+
+        <button
+          type="button"
+          className="wheel-emote-btn pos-top-right"
+          id="btn-emote-float"
+          data-emote="float"
+          role="menuitem"
+          title="Mystic Arcane Levitation"
+        >
+          <span className="wheel-emote-icon" aria-hidden="true">✦</span>
+          <span className="wheel-emote-text">Float</span>
+        </button>
+
+        <button
+          type="button"
+          className="wheel-emote-btn pos-bottom-right"
+          id="btn-emote-angry"
+          data-emote="angry"
+          role="menuitem"
+          title="Furious Stone War-Stomp"
+        >
+          <span className="wheel-emote-icon" aria-hidden="true">⚡</span>
+          <span className="wheel-emote-text">Angry</span>
+        </button>
+
+        <button
+          type="button"
+          className="wheel-emote-btn pos-bottom-left"
+          id="btn-emote-spin"
+          data-emote="spin"
+          role="menuitem"
+          title="Whirlwind 1080° Pirouette Spin"
+        >
+          <span className="wheel-emote-icon" aria-hidden="true">↻</span>
+          <span className="wheel-emote-text">Spin</span>
+        </button>
+
+        <button
+          type="button"
+          className="wheel-emote-btn pos-top-left"
+          id="btn-emote-groove"
+          data-emote="groove"
+          role="menuitem"
+          title="Breakdance Flip &amp; Groove"
+        >
+          <span className="wheel-emote-icon" aria-hidden="true">★</span>
+          <span className="wheel-emote-text">Groove</span>
+        </button>
+      </div>
+
       <div id="hud-bottom">
         <div className="hint-pill" id="controls-hint">
-          <strong>Controls:</strong> Click Piece to Move &nbsp;•&nbsp; Left-Drag: Orbit &nbsp;•&nbsp; Right-Drag: Pan &nbsp;•&nbsp; Scroll: Zoom &nbsp;•&nbsp; WASD + R/F: Fly Cam &nbsp;•&nbsp; H: Hide UI
+          <strong>Controls:</strong> Click Piece to Move or Emote &nbsp;•&nbsp; Left-Drag: Orbit &nbsp;•&nbsp; Right-Drag: Pan &nbsp;•&nbsp; Scroll: Zoom &nbsp;•&nbsp; WASD + R/F: Fly Cam &nbsp;•&nbsp; H: Hide UI
         </div>
         <div className="captured-pill" id="captured-tray"></div>
       </div>
